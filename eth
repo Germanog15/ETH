@@ -1,0 +1,44 @@
+WITH prices AS (
+SELECT 
+    DATE_TRUNC('day',minute) AS time
+    ,AVG(price) AS eth_price
+FROM prices.usd
+WHERE symbol = 'WETH' 
+      AND minute >= TIMESTAMP '{{start_date_financials}}'
+GROUP BY 1
+),
+
+txn_fees AS (
+SELECT
+    *
+    ,SUM(txn_fees_usd / 1000000000) OVER(ORDER BY time) AS ttm_fees
+    ,AVG(txn_fees_usd * 12) OVER(ORDER BY time ROWS BETWEEN 29 PRECEDING AND CURRENT ROW) AS annualized_30d_fees
+FROM (
+    SELECT
+        sub.*
+        ,txn_fees * eth_price AS txn_fees_usd
+    FROM (
+        SELECT 
+            DATE_TRUNC('day',block_time) AS time
+            ,SUM(CASE 
+                WHEN (type = 'Legacy' OR type = 'AccessList') THEN CAST(gas_price AS DOUBLE)  * CAST(t.gas_used AS DOUBLE) / 1e18
+                WHEN type = 'DynamicFee' AND CAST(base_fee_per_gas AS DOUBLE) + CAST(max_priority_fee_per_gas AS DOUBLE) <= CAST(max_fee_per_gas AS DOUBLE) THEN (CAST(base_fee_per_gas AS DOUBLE) + COALESCE(CAST(max_priority_fee_per_gas AS DOUBLE),0)) * CAST(t.gas_used AS DOUBLE) / 1e18
+                WHEN type = 'DynamicFee' AND CAST(base_fee_per_gas AS DOUBLE) + CAST(max_priority_fee_per_gas AS DOUBLE) > CAST(max_fee_per_gas AS DOUBLE) THEN (CAST(max_fee_per_gas AS DOUBLE) * CAST(t.gas_used AS DOUBLE)) / 1e18
+                END) AS txn_fees
+        FROM ethereum.transactions t
+        LEFT JOIN ethereum.blocks b ON block_number = number
+        WHERE block_time BETWEEN TIMESTAMP '{{start_date_financials}}' AND DATE_TRUNC('day',NOW())
+        GROUP BY 1
+        )sub 
+    LEFT JOIN prices p ON sub.time = p.time 
+    )sub2
+ORDER BY 1 DESC
+)
+
+SELECT 
+    *
+    ,CASE WHEN '{{currency_financials}}' = 'ETH' THEN txn_fees
+          WHEN '{{currency_financials}}' = 'USD' THEN txn_fees_usd
+          END AS for_chart
+FROM txn_fees
+WHERE time >= TIMESTAMP '{{start_date_financials}}'
